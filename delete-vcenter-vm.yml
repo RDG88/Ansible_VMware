@@ -2,6 +2,11 @@
 - name: Running task to delete vm from vcenter
   hosts: localhost
   gather_facts: no
+  vars:
+    user: 'Username'
+    password: 'Password'
+    vcenter: 'vcenter.fqdn.nl'
+    vm: 'vmname'
   tasks:
 
   - name: Login to vCenter

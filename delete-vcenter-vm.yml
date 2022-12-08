@@ -1,0 +1,43 @@
+---
+- name: Running task to delete vm from vcenter
+  hosts: localhost
+  gather_facts: no
+  tasks:
+
+  - name: Login to vCenter
+    ansible.builtin.uri:
+      url: 'https://{{ vcenter }}/rest/com/vmware/cis/session'
+      validate_certs: false
+      status_code: 200
+      method: POST
+      user: '{{ user }}'
+      password: '{{ password }}'
+      force_basic_auth: yes
+    register: vcenter_login_cookie
+
+  - name: List all VM's from {{ vcenter }}
+    ansible.builtin.uri:
+      url: 'https://{{ vcenter }}/api/vcenter/vm'
+      validate_certs: false
+      method: GET
+      body_format: json
+      headers:
+        Cookie: "{{ vcenter_login_cookie.cookies_string }}"
+    register: get_vms
+
+  - name: Check if we can find {{ vm }} in {{ vcenter }}
+    set_fact: 
+      foundvm: '{{ get_vms.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[? name==`{{ vm }}`]"
+    failed_when: foundvm|length == 0
+
+  - name: Delete {{ foundvm[0].name }}
+    ansible.builtin.uri:
+      url: 'https://{{ vcenter }}/rest/vcenter/vm/{{ foundvm[0].vm }}'
+      validate_certs: false
+      method: Delete
+      body_format: json
+      status_code: 200
+      headers:
+        Cookie: "{{ vcenter_login_cookie.cookies_string }}"

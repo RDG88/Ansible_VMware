@@ -1,0 +1,136 @@
+---
+- name: Running task....
+  hosts: localhost
+  gather_facts: no
+  vars:
+    username: 'Username'
+    password: 'Password'
+    domain: 'Domain'
+    connectionserver: 'cs.fqdn.nl'
+    datacenter: 'Datacenter'
+    golden_image_vm: 'w21h2'
+    golden_image_snapshot: 'Golden_Image'
+    desktop_pool: 'GVDI'
+    #'WAIT_FOR_LOGOFF' OR 'FORCE_LOGOFF'
+    logoff_policy: 'WAIT_FOR_LOGOFF'
+    vcenter_fqdn: 'vcsa.fqdn.nl'
+  tasks:
+
+  - name: Login to Horizon
+    ansible.builtin.uri:
+      url: https://{{ connectionserver }}/rest/login
+      validate_certs: false
+      status_code: 200
+      method: POST
+      body_format: json
+      body:
+        username: '{{ username }}'
+        password: '{{ password }}'
+        domain: '{{ domain }}'
+    register: login_token
+
+  - name: Get Horizon vCenters
+    ansible.builtin.uri:
+      url: https://{{ connectionserver }}/rest/monitor/v2/virtual-centers
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: vcenters
+
+  - name: Check if we can find {{ vcenter_fqdn }} in Horizon vCenters
+    set_fact: 
+      found_vcenter: '{{ vcenters.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[?contains (name,'{{ vcenter_fqdn }}')]"
+    failed_when: found_vcenter|length == 0
+
+  - name: Get Datacenter
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/external/v1/datacenters?vcenter_id={{ found_vcenter[0].id }}'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: hzn_datacenter
+
+  - name: Check if we can find {{ datacenter }} in Horizon API
+    set_fact: 
+      found_datacenter: '{{ hzn_datacenter.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[?contains (name,'{{ datacenter }}')]"
+    failed_when: found_datacenter|length == 0
+  
+  - name: Get BaseVMS
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/external/v1/base-vms?datacenter_id={{ found_datacenter[0].id }}&filter_incompatible_vms=false&vcenter_id={{ found_vcenter[0].id }}'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: basevms
+
+  - name: Check if we can find the basevm {{ golden_image_vm }} in Horizon API
+    set_fact: 
+      found_basevm: '{{ basevms.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[? name==`{{ golden_image_vm }}`]"
+    failed_when: found_basevm|length == 0
+
+  - name: Get BaseSnapshots
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/external/v1/base-snapshots?base_vm_id={{ found_basevm[0].id }}&filter_incompatible_vms=false&vcenter_id={{ found_vcenter[0].id }}'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: BaseSnapshots  
+
+  - name: Check if we can find the BaseSnapshot {{ golden_image_snapshot }} in Horizon API
+    set_fact: 
+      found_basesnapshot: '{{ BaseSnapshots.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[? name==`{{ golden_image_snapshot }}`]"
+    failed_when: found_basesnapshot|length == 0
+
+  - name: Get Desktop pools
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/inventory/v1/desktop-pools'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: DesktopPools
+
+  - name: Check if we can find the desktop pool - {{ desktop_pool }} in Horizon API
+    set_fact: 
+      found_desktoppool: '{{ DesktopPools.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[? name==`{{ desktop_pool }}`]"
+    failed_when: found_desktoppool|length == 0
+
+  - name: Push Golden Image
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/inventory/v1/desktop-pools/{{ found_desktoppool[0].id }}/action/schedule-push-image'
+      validate_certs: false
+      status_code: 204
+      method: POST
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+      body_format: json
+      body:
+        logoff_policy: '{{ logoff_policy }}'
+        parent_vm_id: '{{ found_basevm[0].id }}'
+        snapshot_id: '{{ found_basesnapshot[0].id }}'
+        stop_on_first_error: true

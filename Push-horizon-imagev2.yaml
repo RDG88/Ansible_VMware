@@ -1,0 +1,187 @@
+
+
+---
+- name: Running task....
+  hosts: localhost
+  gather_facts: no
+  vars:
+    username: 'Username'
+    password: 'Password'
+    domain: 'LAB'
+    connectionserver: 'vdi.lab.fqdn.nl'
+    datacenter: 'Graafnet-Datacenter'
+    golden_image_vm: 'prd-win10-ic'
+    golden_image_snapshot: 'snap9'
+    desktop_pool: 'W10-IC-DC01'
+    #'WAIT_FOR_LOGOFF' OR 'FORCE_LOGOFF'
+    logoff_policy: 'FORCE_LOGOFF'
+    vcenter_fqdn: 'vlab.inf.fqdn.nl'
+    wait_until_image_is_pushed: true
+    # The below vars don't have to be defined, it will take the current configuration when pushing an image
+    # When you define num_cpu you need to define num_cores and the other way arround
+    compute_profile_num_cpus: 4
+    compute_profile_ram_gb: 4
+    compute_profile_num_cores_per_socket: 1
+    add_virtual_tpm: false
+
+  tasks:
+  - name: Check variable definition consistency
+    fail:
+      msg: "Both compute_profile_num_cores_per_socket and compute_profile_num_cpus must be defined or undefined together"
+    when: (compute_profile_num_cores_per_socket is defined and compute_profile_num_cpus is not defined) or
+          (compute_profile_num_cores_per_socket is not defined and compute_profile_num_cpus is defined)
+
+  - name: Validate CPU Configuration
+    fail:
+      msg: "The number of CPUs must be a multiple of cores per socket."
+    when: 
+      - compute_profile_num_cores_per_socket is defined
+      - (compute_profile_num_cpus | int) % (compute_profile_num_cores_per_socket | int) != 0
+
+  - name: Login to Horizon
+    ansible.builtin.uri:
+      url: https://{{ connectionserver }}/rest/login
+      validate_certs: false
+      status_code: 200
+      method: POST
+      body_format: json
+      body:
+        username: '{{ username }}'
+        password: '{{ password }}'
+        domain: '{{ domain }}'
+    register: login_token
+
+  - name: Get Horizon vCenters
+    ansible.builtin.uri:
+      url: https://{{ connectionserver }}/rest/monitor/v2/virtual-centers
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: vcenters
+
+  - name: Check if we can find {{ vcenter_fqdn }} in Horizon vCenters
+    set_fact: 
+      found_vcenter: '{{ vcenters.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[?contains (name,'{{ vcenter_fqdn }}')]"
+    failed_when: found_vcenter|length == 0
+
+  - name: Get Datacenter
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/external/v1/datacenters?vcenter_id={{ found_vcenter[0].id }}'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: hzn_datacenter
+
+  - name: Check if we can find {{ datacenter }} in Horizon API
+    set_fact: 
+      found_datacenter: '{{ hzn_datacenter.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[?contains (name,'{{ datacenter }}')]"
+    failed_when: found_datacenter|length == 0
+  
+  - name: Get BaseVMS
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/external/v1/base-vms?datacenter_id={{ found_datacenter[0].id }}&filter_incompatible_vms=false&vcenter_id={{ found_vcenter[0].id }}'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: basevms
+
+  - name: Check if we can find the basevm {{ golden_image_vm }} in Horizon API
+    set_fact: 
+      found_basevm: '{{ basevms.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[? name==`{{ golden_image_vm }}`]"
+    failed_when: found_basevm|length == 0
+
+  - name: Get BaseSnapshots
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/external/v1/base-snapshots?base_vm_id={{ found_basevm[0].id }}&filter_incompatible_vms=false&vcenter_id={{ found_vcenter[0].id }}'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: BaseSnapshots  
+
+  - name: Check if we can find the BaseSnapshot {{ golden_image_snapshot }} in Horizon API
+    set_fact: 
+      found_basesnapshot: '{{ BaseSnapshots.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[? name==`{{ golden_image_snapshot }}`]"
+    failed_when: found_basesnapshot|length == 0
+
+  - name: Get Desktop pools
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/inventory/v1/desktop-pools'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: DesktopPools
+
+  - name: Check if we can find the desktop pool - {{ desktop_pool }} in Horizon API
+    set_fact: 
+      found_desktoppool: '{{ DesktopPools.json | json_query(jmesquery) }}'
+    vars: 
+      jmesquery: "[? name==`{{ desktop_pool }}`]"
+    failed_when: found_desktoppool|length == 0
+
+  - name: Push Golden Image
+    ansible.builtin.uri:
+      url: 'https://{{ connectionserver }}/rest/inventory/v2/desktop-pools/{{ found_desktoppool[0].id }}/action/schedule-push-image'
+      validate_certs: false
+      status_code: 200
+      method: POST
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+      body_format: json
+      body: >
+        {
+          {% if compute_profile_num_cores_per_socket is defined %}
+            "compute_profile_num_cores_per_socket": {{ compute_profile_num_cores_per_socket }},
+          {% endif %}
+          {% if compute_profile_num_cpus is defined %}
+            "compute_profile_num_cpus": {{ compute_profile_num_cpus }},
+          {% endif %}
+          {% if compute_profile_ram_gb is defined %}
+            "compute_profile_ram_mb": {{ compute_profile_ram_gb | int * 1024 }},
+          {% endif %}
+          {% if add_virtual_tpm is defined %}
+            "add_virtual_tpm": {{ add_virtual_tpm }},
+          {% endif %}
+            "logoff_policy": "{{ logoff_policy }}",
+            "parent_vm_id": "{{ found_basevm[0].id }}",
+            "snapshot_id": "{{ found_basesnapshot[0].id }}",
+            "stop_on_first_error": true
+        }
+
+  - name: Wait until image is pushed
+    uri:
+      url: 'https://{{ connectionserver }}/rest/inventory/v4/desktop-pools/{{ found_desktoppool[0].id }}'
+      validate_certs: false
+      status_code: 200
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ login_token.json.access_token }}"
+    register: api_response
+    until: (api_response.json.provisioning_status_data.instant_clone_pending_image_state | default("")) == "READY"
+    retries: 600  # Adjust this to control the number of retries and the polling interval (e.g., 60 retries with a sleep of 10 seconds will poll for 10 minutes)
+    delay: 10  # Adjust this to control the polling interval (in seconds)
+    when: wait_until_image_is_pushed

@@ -58,18 +58,6 @@
       debug:
         var: filter_expression
 
-    - name: Get Desktop pool vm details filtert on poolid
-      ansible.builtin.uri:
-        url: 'https://{{ connectionserver }}/rest/inventory/v1/machines?filter={{ filter_expression | to_json | urlencode }}'
-        method: GET
-        headers:
-          Content-Type: application/json
-          Authorization: "Bearer {{ login_response.json.access_token }}"
-      register: vmdetails_poolid
-    - name: Debug vmdetails_poolid
-      debug:
-        var: vmdetails_poolid.json
-
     - name: Wait for all VMs to be AVAILABLE
       ansible.builtin.uri:
         url: 'https://{{ connectionserver }}/rest/inventory/v1/machines?filter={{ filter_expression | to_json | urlencode }}'

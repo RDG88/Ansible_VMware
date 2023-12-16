@@ -1,0 +1,65 @@
+---
+- name: Running task....
+  hosts: localhost
+  gather_facts: no
+  vars:
+    username: 'Username'
+    password: 'Password'
+    domain: 'LAB'
+    connectionserver: 'lab-vmcs-01.fqdn.nl'
+    desktop_pool: 'W10-IC-DC01'
+    provisioning_enabled: true  # Set this to true or false as needed
+
+  tasks:
+    - name: Login to Horizon and Get Desktop pool ID
+      ansible.builtin.uri:
+        url: "https://{{ connectionserver }}/rest/login"
+        validate_certs: false
+        status_code: 200
+        method: POST
+        body_format: json
+        body:
+          username: "{{ username }}"
+          password: "{{ password }}"
+          domain: "{{ domain }}"
+      register: login_response
+
+    - name: Get Desktop pools
+      ansible.builtin.uri:
+        url: "https://{{ connectionserver }}/rest/inventory/v1/desktop-pools"
+        validate_certs: false
+        status_code: 200
+        method: GET
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{ login_response.json.access_token }}"
+      register: desktop_pools_response
+
+    - name: Set desktop pool ID
+      set_fact:
+        desktop_pool_id: "{{ desktop_pools_response.json | json_query(query) | first }}"
+      vars:
+        query: "[?name == '{{ desktop_pool }}'].id"
+      failed_when: desktop_pool_id is none
+
+    - name: Get the current state of the desktop pool
+      ansible.builtin.uri:
+        url: "https://{{ connectionserver }}/rest/inventory/v7/desktop-pools/{{ desktop_pool_id }}"
+        method: GET
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{ login_response.json.access_token }}"
+        return_content: yes
+      register: pool_details
+
+    - name: "{{ 'Enabling' if provisioning_enabled else 'Disabling' }} provisioning for the Desktop pool '{{ desktop_pool }}'"
+      ansible.builtin.uri:
+        url: "https://{{ connectionserver }}/rest/inventory/v7/desktop-pools/{{ desktop_pool_id }}"
+        method: PUT
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{ login_response.json.access_token }}"
+        body_format: json
+        body: "{{ pool_details.json | combine({'enable_provisioning': provisioning_enabled}, recursive=True) }}"
+        status_code: 204 
+      register: update_response
